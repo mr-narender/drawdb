@@ -1,4 +1,4 @@
-import { createContext, useCallback, useState } from "react";
+import { createContext, useCallback, useMemo, useRef, useState } from "react";
 import { Action, DB, ObjectType, defaultBlue } from "../data/constants";
 import { useTransform, useUndoRedo, useSelect, useCollab } from "../hooks";
 import { Toast } from "@douyinfe/semi-ui";
@@ -8,12 +8,14 @@ import { getRelationshipFields } from "../utils/utils";
 import { cascadePosition } from "../utils/rect";
 
 export const DiagramContext = createContext(null);
+export const DiagramActionsContext = createContext(null);
 
 export default function DiagramContextProvider({ children }) {
   const { t } = useTranslation();
   const [database, setDatabaseRaw] = useState(DB.GENERIC);
   const [tables, setTables] = useState([]);
   const [relationships, setRelationships] = useState([]);
+  const [sqlHeader, setSqlHeaderRaw] = useState("");
   const { transform } = useTransform();
   const { setUndoStack, setRedoStack } = useUndoRedo();
   const { selectedElement, setSelectedElement } = useSelect();
@@ -29,6 +31,21 @@ export default function DiagramContextProvider({ children }) {
           target: "database",
           action: "update",
           entityId: "database",
+          data: [next],
+        });
+      }
+    },
+    [emitDelta, isApplyingRemoteRef],
+  );
+
+  const setSqlHeader = useCallback(
+    (next) => {
+      setSqlHeaderRaw(next);
+      if (!isApplyingRemoteRef?.current) {
+        emitDelta({
+          target: "sqlHeader",
+          action: "update",
+          entityId: "sqlHeader",
           data: [next],
         });
       }
@@ -154,6 +171,24 @@ export default function DiagramContextProvider({ children }) {
         action: "update",
         entityId: id,
         data: [id, updatedValues],
+      });
+    }
+  };
+
+  const updateTables = (updatesById) => {
+    setTables((prev) =>
+      prev.map((t) =>
+        updatesById.has(t.id) ? { ...t, ...updatesById.get(t.id) } : t,
+      ),
+    );
+    if (shouldEmit()) {
+      updatesById.forEach((updatedValues, id) => {
+        emitDelta({
+          target: "table",
+          action: "update",
+          entityId: id,
+          data: [id, updatedValues],
+        });
       });
     }
   };
@@ -314,28 +349,55 @@ export default function DiagramContextProvider({ children }) {
     }
   };
 
+  const latestActionsRef = useRef(null);
+  latestActionsRef.current = {
+    getTables: () => tables,
+    getRelationships: () => relationships,
+    addTable,
+    updateTable,
+    updateTables,
+    updateField,
+    deleteField,
+    deleteTable,
+    addRelationship,
+    deleteRelationship,
+    updateRelationship,
+  };
+
+  const actions = useMemo(
+    () => ({
+      ...Object.fromEntries(
+        Object.keys(latestActionsRef.current).map((name) => [
+          name,
+          (...args) => latestActionsRef.current[name](...args),
+        ]),
+      ),
+      setTables,
+      setRelationships,
+      setDatabase,
+      setSqlHeader,
+    }),
+    [setDatabase, setSqlHeader],
+  );
+
+  const value = useMemo(
+    () => ({
+      ...actions,
+      tables,
+      relationships,
+      database,
+      sqlHeader,
+      tablesCount: tables.length,
+      relationshipsCount: relationships.length,
+    }),
+    [actions, tables, relationships, database, sqlHeader],
+  );
+
   return (
-    <DiagramContext.Provider
-      value={{
-        tables,
-        setTables,
-        addTable,
-        updateTable,
-        updateField,
-        deleteField,
-        deleteTable,
-        relationships,
-        setRelationships,
-        addRelationship,
-        deleteRelationship,
-        updateRelationship,
-        database,
-        setDatabase,
-        tablesCount: tables.length,
-        relationshipsCount: relationships.length,
-      }}
-    >
-      {children}
-    </DiagramContext.Provider>
+    <DiagramActionsContext.Provider value={actions}>
+      <DiagramContext.Provider value={value}>
+        {children}
+      </DiagramContext.Provider>
+    </DiagramActionsContext.Provider>
   );
 }

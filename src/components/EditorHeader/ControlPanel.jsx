@@ -22,6 +22,7 @@ import {
   Tooltip,
   Spin,
   Tag,
+  Badge,
   Toast,
   Popconfirm,
   Typography,
@@ -99,13 +100,18 @@ import { applyDiagramPlan } from "../../utils/dbml/applyPlan";
 import { diffDiagram } from "../../utils/dbml/diff";
 import { exportSavedData } from "../../utils/exportSavedData";
 import { nanoid } from "nanoid";
-import { getTableHeight, getTableWidth } from "../../utils/utils";
+import {
+  getRelatedFieldKeysByTable,
+  getTableHeight,
+  getTableWidth,
+} from "../../utils/utils";
 import {
   getViewHeight,
   getViewWidth,
   resolveViewColumns,
 } from "../../utils/views";
 import { autoArrange } from "../../utils/autoArrange";
+import { schemaQueries } from "../../utils/importFrom/schemaQuery";
 import { findAutoFKRelationships } from "../../utils/autoRelationships";
 import { deleteFromCache, STORAGE_KEY } from "../../utils/cache";
 import { DateTime } from "luxon";
@@ -124,6 +130,9 @@ export default function ControlPanel({
   lastSaved,
   setLastSaved,
   toolbarContainer,
+  startWith,
+  setStartWith,
+  onBackToStart,
 }) {
   const { id: diagramId } = useParams();
 
@@ -146,6 +155,29 @@ export default function ControlPanel({
     setModal(modalType);
   };
   const [importFrom, setImportFrom] = useState(IMPORT_FROM.JSON);
+
+  const [openedFromStart, setOpenedFromStart] = useState(false);
+  const [seenMenuTags, setSeenMenuTags] = useState(() => {
+    try {
+      return new Set(
+        JSON.parse(localStorage.getItem("drawdb:seenMenuTags") || "[]"),
+      );
+    } catch {
+      return new Set();
+    }
+  });
+
+  useEffect(() => {
+    if (!startWith) return;
+    if (startWith.importFrom) setImportFrom(startWith.importFrom);
+    setModal(startWith.modal);
+    setOpenedFromStart(true);
+    setStartWith(null);
+  }, [startWith, setStartWith]);
+
+  useEffect(() => {
+    if (modal === MODAL.NONE) setOpenedFromStart(false);
+  }, [modal]);
   const { saveState, setSaveState } = useSaveState();
   const { layout, setLayout } = useLayout();
   const { settings, setSettings } = useSettings();
@@ -163,6 +195,7 @@ export default function ControlPanel({
     deleteRelationship,
     updateRelationship,
     database,
+    sqlHeader,
   } = useDiagram();
   const { enums, setEnums, deleteEnum, addEnum, updateEnum } = useEnums();
   const { types, addType, deleteType, updateType, setTypes } = useTypes();
@@ -229,7 +262,7 @@ export default function ControlPanel({
       if (a.element === ObjectType.TABLE) {
         deleteTable(a.data.table.id, false);
       } else if (a.element === ObjectType.AREA) {
-        deleteArea(areas[areas.length - 1].id, false);
+        deleteArea(a.data.id, false);
       } else if (a.element === ObjectType.NOTE) {
         deleteNote(notes[notes.length - 1].id, false);
       } else if (a.element === ObjectType.RELATIONSHIP) {
@@ -248,10 +281,8 @@ export default function ControlPanel({
         setRedoStack((prev) => [...prev, { ...a, x, y }]);
         updateTable(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.AREA) {
-        setRedoStack((prev) => [
-          ...prev,
-          { ...a, x: areas[a.id].x, y: areas[a.id].y },
-        ]);
+        const { x, y } = areas.find((area) => area.id === a.id);
+        setRedoStack((prev) => [...prev, { ...a, x, y }]);
         updateArea(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.NOTE) {
         setRedoStack((prev) => [
@@ -269,7 +300,7 @@ export default function ControlPanel({
       } else if (a.element === ObjectType.NOTE) {
         addNote(a.data, false);
       } else if (a.element === ObjectType.AREA) {
-        addArea(a.data, false);
+        addArea(a.data, false, a.index);
       } else if (a.element === ObjectType.TYPE) {
         addType(a.data, false);
       } else if (a.element === ObjectType.ENUM) {
@@ -447,7 +478,7 @@ export default function ControlPanel({
       if (a.element === ObjectType.TABLE) {
         addTable(a.data, false);
       } else if (a.element === ObjectType.AREA) {
-        addArea(null, false);
+        addArea(a.data, false);
       } else if (a.element === ObjectType.NOTE) {
         addNote(null, false);
       } else if (a.element === ObjectType.RELATIONSHIP) {
@@ -466,10 +497,8 @@ export default function ControlPanel({
         setUndoStack((prev) => [...prev, { ...a, x, y }]);
         updateTable(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.AREA) {
-        setUndoStack((prev) => [
-          ...prev,
-          { ...a, x: areas[a.id].x, y: areas[a.id].y },
-        ]);
+        const { x, y } = areas.find((area) => area.id === a.id);
+        setUndoStack((prev) => [...prev, { ...a, x, y }]);
         updateArea(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.NOTE) {
         setUndoStack((prev) => [
@@ -689,13 +718,19 @@ export default function ControlPanel({
       maxY: -Infinity,
     };
 
+    const relatedFieldKeysByTable = getRelatedFieldKeysByTable(relationships);
     tablesToFit.forEach((table) => {
       minMaxXY.minX = Math.min(minMaxXY.minX, table.x);
       minMaxXY.minY = Math.min(minMaxXY.minY, table.y);
       minMaxXY.maxX = Math.max(minMaxXY.maxX, table.x + getTableWidth(table));
       minMaxXY.maxY = Math.max(
         minMaxXY.maxY,
-        table.y + getTableHeight(table, settings.showComments, relationships),
+        table.y +
+          getTableHeight(
+            table,
+            settings.showComments,
+            relatedFieldKeysByTable.get(table.id),
+          ),
       );
     });
 
@@ -923,14 +958,16 @@ export default function ControlPanel({
           id: notes.length,
         });
         break;
-      case ObjectType.AREA:
+      case ObjectType.AREA: {
+        const copiedArea = areas.find((a) => a.id === selectedElement.id);
         addArea({
-          ...areas[selectedElement.id],
-          x: areas[selectedElement.id].x + 20,
-          y: areas[selectedElement.id].y + 20,
-          id: areas.length,
+          ...copiedArea,
+          x: copiedArea.x + 20,
+          y: copiedArea.y + 20,
+          id: nanoid(),
         });
         break;
+      }
       case ObjectType.VIEW: {
         const copiedView = views.find((v) => v.id === selectedElement.id);
         addView({
@@ -970,7 +1007,9 @@ export default function ControlPanel({
         break;
       case ObjectType.AREA:
         navigator.clipboard
-          .writeText(JSON.stringify({ ...areas[selectedElement.id] }))
+          .writeText(
+            JSON.stringify(areas.find((a) => a.id === selectedElement.id)),
+          )
           .catch(() => Toast.error(t("oops_smth_went_wrong")));
         break;
       case ObjectType.VIEW:
@@ -1026,7 +1065,7 @@ export default function ControlPanel({
           ...obj,
           x: obj.x + 20,
           y: obj.y + 20,
-          id: areas.length,
+          id: nanoid(),
         });
       } else if (v.validate(obj, noteSchema).valid) {
         addNote({
@@ -1064,6 +1103,7 @@ export default function ControlPanel({
         notes,
         areas,
         views,
+        sqlHeader,
         pan: transform.pan,
         zoom: transform.zoom,
         ...(databases[database].hasEnums && { enums }),
@@ -1124,6 +1164,7 @@ export default function ControlPanel({
       notes,
       areas,
       views,
+      sqlHeader,
       pan: transform.pan,
       zoom: transform.zoom,
       ...(databases[database].hasEnums && { enums }),
@@ -1186,7 +1227,7 @@ export default function ControlPanel({
   const menu = {
     file: {
       new: {
-        function: () => setModal(MODAL.NEW),
+        function: () => window.open("/editor/templates/blank", "_blank"),
       },
       new_window: {
         function: () => window.open("/editor", "_blank"),
@@ -1245,6 +1286,7 @@ export default function ControlPanel({
               notes: notes,
               subjectAreas: areas,
               views: views,
+              sqlHeader: sqlHeader,
               custom: 1,
               templateId: uuidv4(),
               ...(databases[database].hasEnums && { enums: enums }),
@@ -1368,6 +1410,25 @@ export default function ControlPanel({
           if (database === DB.GENERIC) return;
 
           setModal(MODAL.IMPORT_SRC);
+        },
+        disabled: layout.readOnly,
+      },
+      import_from_database: {
+        is_new: true,
+        ...(database === DB.GENERIC && {
+          children: Object.keys(schemaQueries).map((db) => ({
+            function: () => {
+              setModal(MODAL.IMPORT_DB);
+              setImportDb(db);
+            },
+            name: databases[db].name,
+            disabled: layout.readOnly,
+          })),
+        }),
+        function: () => {
+          if (database === DB.GENERIC) return;
+
+          setModal(MODAL.IMPORT_DB);
         },
         disabled: layout.readOnly,
       },
@@ -1495,6 +1556,7 @@ export default function ControlPanel({
             database: database,
             enums: enums,
             views: views,
+            sqlHeader: sqlHeader,
           });
           setExportData((prev) => ({
             ...prev,
@@ -1565,6 +1627,7 @@ export default function ControlPanel({
                   database: database,
                   ...(databases[database].hasTypes && { types: types }),
                   ...(databases[database].hasEnums && { enums: enums }),
+                  ...(sqlHeader && { sqlHeader: sqlHeader }),
                   title: title,
                 },
                 null,
@@ -2047,6 +2110,15 @@ export default function ControlPanel({
         importFrom={importFrom}
         importDb={importDb}
         saveAsCopy={saveAsCopy}
+        fitToView={fitToView}
+        onBack={
+          openedFromStart
+            ? () => {
+                setModal(MODAL.NONE);
+                onBackToStart();
+              }
+            : undefined
+        }
       />
       <Sidesheet
         type={sidesheet}
@@ -2068,9 +2140,7 @@ export default function ControlPanel({
         cancelText={t("cancel")}
       >
         <div className="space-y-3">
-          <p className="text-sm">
-            {t("auto_connect_fk_modal_description")}
-          </p>
+          <p className="text-sm">{t("auto_connect_fk_modal_description")}</p>
           <ol className="list-decimal ps-5 space-y-1 text-sm">
             <li>{t("auto_connect_fk_rule_1")}</li>
             <li>{t("auto_connect_fk_rule_2")}</li>
@@ -2317,8 +2387,12 @@ export default function ControlPanel({
                     filter:
                       "opacity(0.4) drop-shadow(0 0 0 white) drop-shadow(0 0 0 white)",
                   }}
-                  alt={t("database_icon", { databaseName: databases[database].name })}
-                  title={t("database_diagram", { databaseName: databases[database].name })}
+                  alt={t("database_icon", {
+                    databaseName: databases[database].name,
+                  })}
+                  title={t("database_diagram", {
+                    databaseName: databases[database].name,
+                  })}
                 />
               )}
               <Slot name="diagram-title-prefix" />
@@ -2354,6 +2428,27 @@ export default function ControlPanel({
                   <Dropdown
                     key={category}
                     position="bottomLeft"
+                    onVisibleChange={(visible) => {
+                      const tagged = Object.keys(menu[category]).filter(
+                        (item) =>
+                          (menu[category][item].is_new ||
+                            menu[category][item].children?.some(
+                              (child) => child.is_new,
+                            )) &&
+                          !seenMenuTags.has(item),
+                      );
+                      if (visible || !tagged.length) return;
+                      const next = new Set([...seenMenuTags, ...tagged]);
+                      setSeenMenuTags(next);
+                      try {
+                        localStorage.setItem(
+                          "drawdb:seenMenuTags",
+                          JSON.stringify([...next]),
+                        );
+                      } catch {
+                        return;
+                      }
+                    }}
                     style={{
                       width: "240px",
                       direction: isRtl(i18n.language) ? "rtl" : "ltr",
@@ -2396,6 +2491,15 @@ export default function ControlPanel({
                                                 {e.label}
                                               </Tag>
                                             )}
+                                            {e.is_new && (
+                                              <Tag
+                                                size="small"
+                                                color="blue"
+                                                className="flex-shrink-0"
+                                              >
+                                                {t("new")}
+                                              </Tag>
+                                            )}
                                           </Dropdown.Item>
                                         );
                                       },
@@ -2411,7 +2515,14 @@ export default function ControlPanel({
                                   }}
                                   onClick={menu[category][item].function}
                                 >
-                                  {t(item)}
+                                  <span className="flex items-center gap-2">
+                                    {t(item)}
+                                    {menu[category][item].is_new && (
+                                      <Tag size="small" color="blue">
+                                        {t("new")}
+                                      </Tag>
+                                    )}
+                                  </span>
 
                                   {isRtl(i18n.language) ? (
                                     <IconChevronLeft />
@@ -2454,7 +2565,14 @@ export default function ControlPanel({
                               }
                             >
                               <div className="w-full flex items-center justify-between">
-                                <div>{t(item)}</div>
+                                <div className="flex items-center gap-2">
+                                  {t(item)}
+                                  {menu[category][item].is_new && (
+                                    <Tag size="small" color="blue">
+                                      {t("new")}
+                                    </Tag>
+                                  )}
+                                </div>
                                 <div className="flex items-center gap-1">
                                   {menu[category][item].shortcut && (
                                     <div className="text-gray-400">
@@ -2472,7 +2590,24 @@ export default function ControlPanel({
                     }
                   >
                     <div className="px-3 py-1 hover-2 rounded-sm">
-                      {t(category)}
+                      {Object.keys(menu[category]).some(
+                        (item) =>
+                          (menu[category][item].is_new ||
+                            menu[category][item].children?.some(
+                              (child) => child.is_new,
+                            )) &&
+                          !seenMenuTags.has(item),
+                      ) ? (
+                        <Badge
+                          dot
+                          type="primary"
+                          countStyle={{ right: -7, top: 5 }}
+                        >
+                          {t(category)}
+                        </Badge>
+                      ) : (
+                        t(category)
+                      )}
                     </div>
                   </Dropdown>
                 ))}
