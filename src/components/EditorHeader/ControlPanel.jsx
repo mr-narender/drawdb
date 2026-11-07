@@ -22,6 +22,7 @@ import {
   Tooltip,
   Spin,
   Tag,
+  Badge,
   Toast,
   Popconfirm,
   Typography,
@@ -99,13 +100,18 @@ import { applyDiagramPlan } from "../../utils/dbml/applyPlan";
 import { diffDiagram } from "../../utils/dbml/diff";
 import { exportSavedData } from "../../utils/exportSavedData";
 import { nanoid } from "nanoid";
-import { getTableHeight, getTableWidth } from "../../utils/utils";
+import {
+  getRelatedFieldKeysByTable,
+  getTableHeight,
+  getTableWidth,
+} from "../../utils/utils";
 import {
   getViewHeight,
   getViewWidth,
   resolveViewColumns,
 } from "../../utils/views";
-import { autoArrange } from "../../utils/autoArrange";
+import { layoutEngines, runLayout } from "../../utils/layout";
+import { schemaQueries } from "../../utils/importFrom/schemaQuery";
 import { findAutoFKRelationships } from "../../utils/autoRelationships";
 import { deleteFromCache, STORAGE_KEY } from "../../utils/cache";
 import { DateTime } from "luxon";
@@ -124,6 +130,9 @@ export default function ControlPanel({
   lastSaved,
   setLastSaved,
   toolbarContainer,
+  startWith,
+  setStartWith,
+  onBackToStart,
 }) {
   const { id: diagramId } = useParams();
 
@@ -146,6 +155,29 @@ export default function ControlPanel({
     setModal(modalType);
   };
   const [importFrom, setImportFrom] = useState(IMPORT_FROM.JSON);
+
+  const [openedFromStart, setOpenedFromStart] = useState(false);
+  const [seenMenuTags, setSeenMenuTags] = useState(() => {
+    try {
+      return new Set(
+        JSON.parse(localStorage.getItem("drawdb:seenMenuTags") || "[]"),
+      );
+    } catch {
+      return new Set();
+    }
+  });
+
+  useEffect(() => {
+    if (!startWith) return;
+    if (startWith.importFrom) setImportFrom(startWith.importFrom);
+    setModal(startWith.modal);
+    setOpenedFromStart(true);
+    setStartWith(null);
+  }, [startWith, setStartWith]);
+
+  useEffect(() => {
+    if (modal === MODAL.NONE) setOpenedFromStart(false);
+  }, [modal]);
   const { saveState, setSaveState } = useSaveState();
   const { layout, setLayout } = useLayout();
   const { settings, setSettings } = useSettings();
@@ -163,6 +195,7 @@ export default function ControlPanel({
     deleteRelationship,
     updateRelationship,
     database,
+    sqlHeader,
   } = useDiagram();
   const { enums, setEnums, deleteEnum, addEnum, updateEnum } = useEnums();
   const { types, addType, deleteType, updateType, setTypes } = useTypes();
@@ -229,7 +262,7 @@ export default function ControlPanel({
       if (a.element === ObjectType.TABLE) {
         deleteTable(a.data.table.id, false);
       } else if (a.element === ObjectType.AREA) {
-        deleteArea(areas[areas.length - 1].id, false);
+        deleteArea(a.data.id, false);
       } else if (a.element === ObjectType.NOTE) {
         deleteNote(notes[notes.length - 1].id, false);
       } else if (a.element === ObjectType.RELATIONSHIP) {
@@ -248,10 +281,8 @@ export default function ControlPanel({
         setRedoStack((prev) => [...prev, { ...a, x, y }]);
         updateTable(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.AREA) {
-        setRedoStack((prev) => [
-          ...prev,
-          { ...a, x: areas[a.id].x, y: areas[a.id].y },
-        ]);
+        const { x, y } = areas.find((area) => area.id === a.id);
+        setRedoStack((prev) => [...prev, { ...a, x, y }]);
         updateArea(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.NOTE) {
         setRedoStack((prev) => [
@@ -269,7 +300,7 @@ export default function ControlPanel({
       } else if (a.element === ObjectType.NOTE) {
         addNote(a.data, false);
       } else if (a.element === ObjectType.AREA) {
-        addArea(a.data, false);
+        addArea(a.data, false, a.index);
       } else if (a.element === ObjectType.TYPE) {
         addType(a.data, false);
       } else if (a.element === ObjectType.ENUM) {
@@ -447,7 +478,7 @@ export default function ControlPanel({
       if (a.element === ObjectType.TABLE) {
         addTable(a.data, false);
       } else if (a.element === ObjectType.AREA) {
-        addArea(null, false);
+        addArea(a.data, false);
       } else if (a.element === ObjectType.NOTE) {
         addNote(null, false);
       } else if (a.element === ObjectType.RELATIONSHIP) {
@@ -466,10 +497,8 @@ export default function ControlPanel({
         setUndoStack((prev) => [...prev, { ...a, x, y }]);
         updateTable(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.AREA) {
-        setUndoStack((prev) => [
-          ...prev,
-          { ...a, x: areas[a.id].x, y: areas[a.id].y },
-        ]);
+        const { x, y } = areas.find((area) => area.id === a.id);
+        setUndoStack((prev) => [...prev, { ...a, x, y }]);
         updateArea(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.NOTE) {
         setUndoStack((prev) => [
@@ -689,13 +718,19 @@ export default function ControlPanel({
       maxY: -Infinity,
     };
 
+    const relatedFieldKeysByTable = getRelatedFieldKeysByTable(relationships);
     tablesToFit.forEach((table) => {
       minMaxXY.minX = Math.min(minMaxXY.minX, table.x);
       minMaxXY.minY = Math.min(minMaxXY.minY, table.y);
       minMaxXY.maxX = Math.max(minMaxXY.maxX, table.x + getTableWidth(table));
       minMaxXY.maxY = Math.max(
         minMaxXY.maxY,
-        table.y + getTableHeight(table, settings.showComments, relationships),
+        table.y +
+          getTableHeight(
+            table,
+            settings.showComments,
+            relatedFieldKeysByTable.get(table.id),
+          ),
       );
     });
 
@@ -749,34 +784,71 @@ export default function ControlPanel({
       pan: { x: centerX, y: centerY },
     }));
   };
-  const autoArrangeTables = () => {
-    const positions = autoArrange(tables, relationships, settings);
-    const positionById = new Map(positions.map((p) => [p.id, p]));
+  const [arrangeMenuOpen, setArrangeMenuOpen] = useState(false);
+  const autoArrangeTables = async (engineId) => {
+    if (layout.readOnly) return;
+    let layoutResult;
+    try {
+      layoutResult = await runLayout(engineId, {
+        tables,
+        relationships,
+        areas,
+        settings,
+      });
+    } catch (e) {
+      Toast.error(e.message);
+      return;
+    }
 
     const elements = [];
+    const tablePositionsById = new Map(
+      layoutResult.tables.map((position) => [position.id, position]),
+    );
     const arrangedTables = tables.map((table) => {
-      const pos = positionById.get(table.id);
-      if (!pos || (pos.x === table.x && pos.y === table.y)) return table;
+      const position = tablePositionsById.get(table.id);
+      if (!position || (position.x === table.x && position.y === table.y)) {
+        return table;
+      }
       elements.push({
         id: table.id,
         type: ObjectType.TABLE,
         undo: { x: table.x, y: table.y },
-        redo: { x: pos.x, y: pos.y },
+        redo: { x: position.x, y: position.y },
       });
-      return { ...table, x: pos.x, y: pos.y };
+      return { ...table, x: position.x, y: position.y };
     });
+    for (const arrangedArea of layoutResult.areas) {
+      const area = areas.find((a) => a.id === arrangedArea.id);
+      if (!area) continue;
+      const { id, ...redo } = arrangedArea;
+      elements.push({
+        id,
+        type: ObjectType.AREA,
+        undo: {
+          x: area.x,
+          y: area.y,
+          width: area.width,
+          height: area.height,
+        },
+        redo,
+      });
+    }
 
     if (elements.length === 0) return;
 
     for (const element of elements) {
-      updateTable(element.id, element.redo);
+      if (element.type === ObjectType.AREA) {
+        updateArea(element.id, element.redo);
+      } else {
+        updateTable(element.id, element.redo);
+      }
     }
     setUndoStack((prev) => [
       ...prev,
       {
         action: Action.MOVE,
         bulk: true,
-        message: t("auto_arrange"),
+        message: `${t("auto_arrange")}: ${t(`layout_${engineId}`)}`,
         elements,
       },
     ]);
@@ -923,14 +995,16 @@ export default function ControlPanel({
           id: notes.length,
         });
         break;
-      case ObjectType.AREA:
+      case ObjectType.AREA: {
+        const copiedArea = areas.find((a) => a.id === selectedElement.id);
         addArea({
-          ...areas[selectedElement.id],
-          x: areas[selectedElement.id].x + 20,
-          y: areas[selectedElement.id].y + 20,
-          id: areas.length,
+          ...copiedArea,
+          x: copiedArea.x + 20,
+          y: copiedArea.y + 20,
+          id: nanoid(),
         });
         break;
+      }
       case ObjectType.VIEW: {
         const copiedView = views.find((v) => v.id === selectedElement.id);
         addView({
@@ -970,7 +1044,9 @@ export default function ControlPanel({
         break;
       case ObjectType.AREA:
         navigator.clipboard
-          .writeText(JSON.stringify({ ...areas[selectedElement.id] }))
+          .writeText(
+            JSON.stringify(areas.find((a) => a.id === selectedElement.id)),
+          )
           .catch(() => Toast.error(t("oops_smth_went_wrong")));
         break;
       case ObjectType.VIEW:
@@ -1026,7 +1102,7 @@ export default function ControlPanel({
           ...obj,
           x: obj.x + 20,
           y: obj.y + 20,
-          id: areas.length,
+          id: nanoid(),
         });
       } else if (v.validate(obj, noteSchema).valid) {
         addNote({
@@ -1064,6 +1140,7 @@ export default function ControlPanel({
         notes,
         areas,
         views,
+        sqlHeader,
         pan: transform.pan,
         zoom: transform.zoom,
         ...(databases[database].hasEnums && { enums }),
@@ -1124,6 +1201,7 @@ export default function ControlPanel({
       notes,
       areas,
       views,
+      sqlHeader,
       pan: transform.pan,
       zoom: transform.zoom,
       ...(databases[database].hasEnums && { enums }),
@@ -1186,7 +1264,7 @@ export default function ControlPanel({
   const menu = {
     file: {
       new: {
-        function: () => setModal(MODAL.NEW),
+        function: () => window.open("/editor/templates/blank", "_blank"),
       },
       new_window: {
         function: () => window.open("/editor", "_blank"),
@@ -1245,6 +1323,7 @@ export default function ControlPanel({
               notes: notes,
               subjectAreas: areas,
               views: views,
+              sqlHeader: sqlHeader,
               custom: 1,
               templateId: uuidv4(),
               ...(databases[database].hasEnums && { enums: enums }),
@@ -1368,6 +1447,25 @@ export default function ControlPanel({
           if (database === DB.GENERIC) return;
 
           setModal(MODAL.IMPORT_SRC);
+        },
+        disabled: layout.readOnly,
+      },
+      import_from_database: {
+        is_new: true,
+        ...(database === DB.GENERIC && {
+          children: Object.keys(schemaQueries).map((db) => ({
+            function: () => {
+              setModal(MODAL.IMPORT_DB);
+              setImportDb(db);
+            },
+            name: databases[db].name,
+            disabled: layout.readOnly,
+          })),
+        }),
+        function: () => {
+          if (database === DB.GENERIC) return;
+
+          setModal(MODAL.IMPORT_DB);
         },
         disabled: layout.readOnly,
       },
@@ -1495,6 +1593,7 @@ export default function ControlPanel({
             database: database,
             enums: enums,
             views: views,
+            sqlHeader: sqlHeader,
           });
           setExportData((prev) => ({
             ...prev,
@@ -1565,6 +1664,7 @@ export default function ControlPanel({
                   database: database,
                   ...(databases[database].hasTypes && { types: types }),
                   ...(databases[database].hasEnums && { enums: enums }),
+                  ...(sqlHeader && { sqlHeader: sqlHeader }),
                   title: title,
                 },
                 null,
@@ -1726,8 +1826,11 @@ export default function ControlPanel({
         disabled: layout.readOnly,
       },
       auto_arrange: {
-        function: autoArrangeTables,
-        disabled: layout.readOnly,
+        children: layoutEngines.map((engine) => ({
+          name: t(`layout_${engine.id}`),
+          function: () => autoArrangeTables(engine.id),
+          disabled: layout.readOnly,
+        })),
       },
       auto_connect_fk: {
         function: autoConnectFKs,
@@ -2047,6 +2150,15 @@ export default function ControlPanel({
         importFrom={importFrom}
         importDb={importDb}
         saveAsCopy={saveAsCopy}
+        fitToView={fitToView}
+        onBack={
+          openedFromStart
+            ? () => {
+                setModal(MODAL.NONE);
+                onBackToStart();
+              }
+            : undefined
+        }
       />
       <Sidesheet
         type={sidesheet}
@@ -2068,9 +2180,7 @@ export default function ControlPanel({
         cancelText={t("cancel")}
       >
         <div className="space-y-3">
-          <p className="text-sm">
-            {t("auto_connect_fk_modal_description")}
-          </p>
+          <p className="text-sm">{t("auto_connect_fk_modal_description")}</p>
           <ol className="list-decimal ps-5 space-y-1 text-sm">
             <li>{t("auto_connect_fk_rule_1")}</li>
             <li>{t("auto_connect_fk_rule_2")}</li>
@@ -2222,15 +2332,40 @@ export default function ControlPanel({
             </button>
           </Tooltip>
           <Divider layout="vertical" margin="8px" />
-          <Tooltip content={t("auto_arrange")} position="bottom">
+          <Dropdown
+            trigger="custom"
+            visible={arrangeMenuOpen}
+            onClickOutSide={() => setArrangeMenuOpen(false)}
+            position={isRtl(i18n.language) ? "bottomRight" : "bottomLeft"}
+            disabled={layout.readOnly}
+            render={
+              <Dropdown.Menu
+                style={isRtl(i18n.language) ? { direction: "rtl" } : {}}
+              >
+                <Dropdown.Title>{t("auto_arrange")}</Dropdown.Title>
+                {layoutEngines.map((engine) => (
+                  <Dropdown.Item
+                    key={engine.id}
+                    onClick={() => {
+                      setArrangeMenuOpen(false);
+                      autoArrangeTables(engine.id);
+                    }}
+                  >
+                    {t(`layout_${engine.id}`)}
+                  </Dropdown.Item>
+                ))}
+              </Dropdown.Menu>
+            }
+          >
             <button
               className="py-1 px-2 hover-2 rounded-sm text-xl -mt-0.5 disabled:opacity-50"
-              onClick={autoArrangeTables}
               disabled={layout.readOnly}
+              title={t("auto_arrange")}
+              onClick={() => setArrangeMenuOpen((open) => !open)}
             >
               <i className="fa-solid fa-wand-magic-sparkles" />
             </button>
-          </Tooltip>
+          </Dropdown>
           <Divider layout="vertical" margin="8px" />
           <Tooltip content={t("save")} position="bottom">
             <button
@@ -2317,8 +2452,12 @@ export default function ControlPanel({
                     filter:
                       "opacity(0.4) drop-shadow(0 0 0 white) drop-shadow(0 0 0 white)",
                   }}
-                  alt={t("database_icon", { databaseName: databases[database].name })}
-                  title={t("database_diagram", { databaseName: databases[database].name })}
+                  alt={t("database_icon", {
+                    databaseName: databases[database].name,
+                  })}
+                  title={t("database_diagram", {
+                    databaseName: databases[database].name,
+                  })}
                 />
               )}
               <Slot name="diagram-title-prefix" />
@@ -2354,6 +2493,27 @@ export default function ControlPanel({
                   <Dropdown
                     key={category}
                     position="bottomLeft"
+                    onVisibleChange={(visible) => {
+                      const tagged = Object.keys(menu[category]).filter(
+                        (item) =>
+                          (menu[category][item].is_new ||
+                            menu[category][item].children?.some(
+                              (child) => child.is_new,
+                            )) &&
+                          !seenMenuTags.has(item),
+                      );
+                      if (visible || !tagged.length) return;
+                      const next = new Set([...seenMenuTags, ...tagged]);
+                      setSeenMenuTags(next);
+                      try {
+                        localStorage.setItem(
+                          "drawdb:seenMenuTags",
+                          JSON.stringify([...next]),
+                        );
+                      } catch {
+                        return;
+                      }
+                    }}
                     style={{
                       width: "240px",
                       direction: isRtl(i18n.language) ? "rtl" : "ltr",
@@ -2396,6 +2556,15 @@ export default function ControlPanel({
                                                 {e.label}
                                               </Tag>
                                             )}
+                                            {e.is_new && (
+                                              <Tag
+                                                size="small"
+                                                color="blue"
+                                                className="flex-shrink-0"
+                                              >
+                                                {t("new")}
+                                              </Tag>
+                                            )}
                                           </Dropdown.Item>
                                         );
                                       },
@@ -2411,7 +2580,14 @@ export default function ControlPanel({
                                   }}
                                   onClick={menu[category][item].function}
                                 >
-                                  {t(item)}
+                                  <span className="flex items-center gap-2">
+                                    {t(item)}
+                                    {menu[category][item].is_new && (
+                                      <Tag size="small" color="blue">
+                                        {t("new")}
+                                      </Tag>
+                                    )}
+                                  </span>
 
                                   {isRtl(i18n.language) ? (
                                     <IconChevronLeft />
@@ -2454,7 +2630,14 @@ export default function ControlPanel({
                               }
                             >
                               <div className="w-full flex items-center justify-between">
-                                <div>{t(item)}</div>
+                                <div className="flex items-center gap-2">
+                                  {t(item)}
+                                  {menu[category][item].is_new && (
+                                    <Tag size="small" color="blue">
+                                      {t("new")}
+                                    </Tag>
+                                  )}
+                                </div>
                                 <div className="flex items-center gap-1">
                                   {menu[category][item].shortcut && (
                                     <div className="text-gray-400">
@@ -2472,7 +2655,24 @@ export default function ControlPanel({
                     }
                   >
                     <div className="px-3 py-1 hover-2 rounded-sm">
-                      {t(category)}
+                      {Object.keys(menu[category]).some(
+                        (item) =>
+                          (menu[category][item].is_new ||
+                            menu[category][item].children?.some(
+                              (child) => child.is_new,
+                            )) &&
+                          !seenMenuTags.has(item),
+                      ) ? (
+                        <Badge
+                          dot
+                          type="primary"
+                          countStyle={{ right: -7, top: 5 }}
+                        >
+                          {t(category)}
+                        </Badge>
+                      ) : (
+                        t(category)
+                      )}
                     </div>
                   </Dropdown>
                 ))}
