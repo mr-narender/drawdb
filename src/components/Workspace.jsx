@@ -30,7 +30,8 @@ import {
   useNavigateWithParams,
 } from "../hooks";
 import FloatingControls from "./FloatingControls";
-import { Button, Modal, Tag } from "@douyinfe/semi-ui";
+import StartModal from "./StartModal";
+import { Button, Modal } from "@douyinfe/semi-ui";
 import { IconAlertTriangle } from "@douyinfe/semi-icons";
 import { useTranslation } from "react-i18next";
 import { databases } from "../data/databases";
@@ -64,6 +65,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
   const [showSelectDbModal, setShowSelectDbModal] = useState(false);
   const [showRestoreModal, setShowRestoreModal] = useState(false);
   const [selectedDb, setSelectedDb] = useState("");
+  const [startWith, setStartWith] = useState(null);
 
   const [diagramSource, setDiagramSource] = useState(null);
   const [dismissedBanners, setDismissedBanners] =
@@ -86,6 +88,8 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     setRelationships,
     database,
     setDatabase,
+    sqlHeader,
+    setSqlHeader,
   } = useDiagram();
   const { undoStack, redoStack, setUndoStack, setRedoStack } = useUndoRedo();
   const { t, i18n } = useTranslation();
@@ -120,6 +124,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       notes,
       areas,
       views,
+      sqlHeader,
       pan: transform.pan,
       zoom: transform.zoom,
       ...(databases[database].hasEnums && { enums }),
@@ -134,6 +139,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       notes,
       areas,
       views,
+      sqlHeader,
       transform,
       enums,
       types,
@@ -186,6 +192,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
           notes: notes,
           areas: areas,
           views: views,
+          sqlHeader: sqlHeader,
           pan: transform.pan,
           zoom: transform.zoom,
           loadedFromGistId: loadedFromGistId,
@@ -210,6 +217,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
           notes: notes,
           areas: areas,
           views: views,
+          sqlHeader: sqlHeader,
           gistId: gistId ?? "",
           pan: transform.pan,
           zoom: transform.zoom,
@@ -234,6 +242,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     notes,
     areas,
     views,
+    sqlHeader,
     types,
     title,
     transform,
@@ -252,17 +261,13 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
   const moveToCloud = useCallback(async () => {
     if (typeof extensions.cloudSave !== "function" || !loadedDiagramId) return;
     setSaveState(State.SAVING);
+    const cloudId = uuidv4();
     try {
-      await extensions.cloudSave(buildCloudPayload(loadedDiagramId), {
-        isNew: true,
-      });
+      await extensions.cloudSave(buildCloudPayload(cloudId), { isNew: true });
       await db.diagrams.where("diagramId").equals(loadedDiagramId).delete();
-      setDiagramSource("cloud");
-      if (typeof cloudLoad === "function") {
-        await cloudLoad(loadedDiagramId);
-      }
       setSaveState(State.SAVED);
       setLastSaved(new Date().toLocaleString());
+      navigate(`/editor/diagrams/${cloudId}`, { replace: true });
     } catch (err) {
       console.warn("move to cloud failed:", err);
       setSaveState(State.ERROR);
@@ -272,7 +277,8 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     loadedDiagramId,
     buildCloudPayload,
     setSaveState,
-    cloudLoad,
+    setLastSaved,
+    navigate,
   ]);
 
   const dismissMoveToCloud = () => {
@@ -313,6 +319,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       setTypes(diagram.types ?? []);
       setEnums(diagram.enums ?? []);
       setViews(diagram.views ?? []);
+      setSqlHeader(diagram.sqlHeader ?? "");
     };
 
     const resetEditorState = () => {
@@ -323,6 +330,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       setTypes([]);
       setEnums([]);
       setViews([]);
+      setSqlHeader("");
       setUndoStack([]);
       setRedoStack([]);
       setTransform({ zoom: 1, pan: { x: 0, y: 0 } });
@@ -388,6 +396,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       setTypes(template.types ?? []);
       setEnums(template.enums ?? []);
       setViews(template.views ?? []);
+      setSqlHeader(template.sqlHeader ?? "");
     };
 
     const loadFromGist = async (shareId, diagramId = null) => {
@@ -409,6 +418,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
         setTypes(parsed.types ?? []);
         setEnums(parsed.enums ?? []);
         setViews(parsed.views ?? []);
+        setSqlHeader(parsed.sqlHeader ?? "");
         if (parsed.customTypes) mergeCustomTypes(parsed.customTypes);
         if (diagramId) {
           navigate(`/editor/diagrams/${diagramId}`, { replace: true });
@@ -460,6 +470,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     setDatabase,
     setEnums,
     setViews,
+    setSqlHeader,
     selectedDb,
     setSaveState,
     setLayout,
@@ -483,7 +494,10 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
       areas?.length === 0 &&
       notes?.length === 0 &&
       views?.length === 0 &&
-      types?.length === 0
+      types?.length === 0 &&
+      enums?.length === 0 &&
+      undoStack.length === 0 &&
+      redoStack.length === 0
     )
       return;
 
@@ -499,12 +513,20 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
     notes?.length,
     views?.length,
     types?.length,
+    enums?.length,
     relationships?.length,
-    transform.zoom,
     title,
     gistId,
+    sqlHeader,
     setSaveState,
   ]);
+
+  useEffect(() => {
+    if (!settings.autosave || tables.length === 0) return;
+
+    const timer = setTimeout(() => setSaveState(State.SAVING), 500);
+    return () => clearTimeout(timer);
+  }, [transform.zoom, settings.autosave, tables.length, setSaveState]);
 
   useEffect(() => {
     if (layout.readOnly) return;
@@ -529,6 +551,9 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
           lastSaved={lastSaved}
           setLastSaved={setLastSaved}
           toolbarContainer={toolbarContainer}
+          startWith={startWith}
+          setStartWith={setStartWith}
+          onBackToStart={() => setShowSelectDbModal(true)}
         />
       </IdContext.Provider>
       <div
@@ -581,9 +606,7 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
               <div className="pointer-events-none absolute inset-x-0 top-3 z-50 flex justify-center">
                 <div className="pointer-events-auto flex items-center gap-3 rounded-full border border-blue-300 bg-blue-50 px-5 py-1.5 shadow-md dark:border-sky-900/50 dark:bg-sky-900/30">
                   <i className="bi bi-hdd" />
-                  <span className="text-sm">
-                    {t("move_to_cloud_prompt")}
-                  </span>
+                  <span className="text-sm">{t("move_to_cloud_prompt")}</span>
                   <Button
                     size="small"
                     theme="solid"
@@ -612,55 +635,19 @@ export default function WorkSpace({ forcedDiagramId } = {}) {
         </div>
         <Slot name="right-panel" />
       </div>
-      <Modal
-        centered
-        size="medium"
-        closable={false}
-        hasCancel={false}
-        title={t("pick_db")}
-        okText={t("confirm")}
+      <StartModal
         visible={showSelectDbModal}
-        onOk={() => {
-          if (selectedDb === "") return;
-          setDatabase(selectedDb);
+        onStart={(database, option) => {
+          setSelectedDb(database);
+          setDatabase(database);
           setShowSelectDbModal(false);
+          if (option.modal) setStartWith(option);
         }}
-        okButtonProps={{ disabled: selectedDb === "" }}
-      >
-        <div className="grid grid-cols-3 gap-4 place-content-center">
-          {Object.values(databases).map((x) => (
-            <div
-              key={x.name}
-              onClick={() => setSelectedDb(x.label)}
-              className={`space-y-3 p-3 rounded-md border-2 select-none ${
-                settings.mode === "dark"
-                  ? "bg-zinc-700 hover:bg-zinc-600"
-                  : "bg-zinc-100 hover:bg-zinc-200"
-              } ${selectedDb === x.label ? "border-zinc-400" : "border-transparent"}`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="font-semibold">{x.name}</div>
-                {x.beta && (
-                  <Tag size="small" color="light-blue">
-                    Beta
-                  </Tag>
-                )}
-              </div>
-              {x.image && (
-                <img
-                  src={x.image}
-                  className="h-8"
-                  style={{
-                    filter:
-                      "opacity(0.4) drop-shadow(0 0 0 white) drop-shadow(0 0 0 white)",
-                  }}
-                />
-              )}
-              <div className="text-xs">{x.description}</div>
-            </div>
-          ))}
-        </div>
-      </Modal>
+        onTemplate={(templateId) => {
+          setShowSelectDbModal(false);
+          navigate(`/editor/templates/${templateId}`, { replace: true });
+        }}
+      />
       <Modal
         visible={showRestoreModal}
         centered
