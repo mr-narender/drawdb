@@ -20,7 +20,7 @@ const affinity = {
   ),
 };
 
-export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
+export function fromMariaDB(ast, diagramDb = DB.GENERIC, existingTables = []) {
   const tables = [];
   const relationships = [];
 
@@ -123,6 +123,7 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
                 tables,
                 table,
                 endTableName,
+                existingTables,
               );
               if (!endTable) return;
 
@@ -149,7 +150,7 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
               relationship.fields = fieldPairs;
               relationship.endFieldId = fieldPairs[0].endFieldId;
               relationship.startFieldId = fieldPairs[0].startFieldId;
-              relationship.id = nanoid()
+              relationship.id = nanoid();
               let updateConstraint = "No action";
               let deleteConstraint = "No action";
               d.reference_definition.on_action.forEach((c) => {
@@ -190,6 +191,16 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
                 u.id = j;
               });
             }
+          } else if (
+            d.resource === "index" &&
+            (d.keyword === "key" || d.keyword === "index")
+          ) {
+            table.indices.push({
+              id: table.indices.length,
+              name: d.index || `${table.name}_index_${table.indices.length}`,
+              unique: false,
+              fields: d.definition.map((c) => c.column),
+            });
           }
         });
 
@@ -256,7 +267,12 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
           const startTable = tables.find((t) => t.name === startTableName);
           if (!startTable) return;
 
-          const endTable = tables.find((t) => t.name === endTableName);
+          const endTable = findReferencedTable(
+            tables,
+            null,
+            endTableName,
+            existingTables,
+          );
           if (!endTable) return;
 
           const fieldPairs = [];
@@ -264,9 +280,7 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
             const sf = startTable.fields.find(
               (f) => f.name === startFieldNames[i],
             );
-            const ef = endTable.fields.find(
-              (f) => f.name === endFieldNames[i],
-            );
+            const ef = endTable.fields.find((f) => f.name === endFieldNames[i]);
             if (!sf || !ef) break;
             fieldPairs.push({ startFieldId: sf.id, endFieldId: ef.id });
           }
