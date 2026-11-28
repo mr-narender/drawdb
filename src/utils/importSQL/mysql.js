@@ -20,7 +20,7 @@ const affinity = {
   ),
 };
 
-export function fromMySQL(ast, diagramDb = DB.GENERIC) {
+export function fromMySQL(ast, diagramDb = DB.GENERIC, existingTables = []) {
   const tables = [];
   const relationships = [];
 
@@ -122,6 +122,7 @@ export function fromMySQL(ast, diagramDb = DB.GENERIC) {
                 tables,
                 table,
                 endTableName,
+                existingTables,
               );
               if (!endTable) return;
 
@@ -190,6 +191,16 @@ export function fromMySQL(ast, diagramDb = DB.GENERIC) {
                 u.id = j;
               });
             }
+          } else if (
+            d.resource === "index" &&
+            (d.keyword === "key" || d.keyword === "index")
+          ) {
+            table.indices.push({
+              id: table.indices.length,
+              name: d.index || `${table.name}_index_${table.indices.length}`,
+              unique: false,
+              fields: d.definition.map((c) => c.column),
+            });
           }
         });
 
@@ -256,7 +267,12 @@ export function fromMySQL(ast, diagramDb = DB.GENERIC) {
           const startTable = tables.find((t) => t.name === startTableName);
           if (!startTable) return;
 
-          const endTable = tables.find((t) => t.name === endTableName);
+          const endTable = findReferencedTable(
+            tables,
+            null,
+            endTableName,
+            existingTables,
+          );
           if (!endTable) return;
 
           const fieldPairs = [];
@@ -264,9 +280,7 @@ export function fromMySQL(ast, diagramDb = DB.GENERIC) {
             const sf = startTable.fields.find(
               (f) => f.name === startFieldNames[i],
             );
-            const ef = endTable.fields.find(
-              (f) => f.name === endFieldNames[i],
-            );
+            const ef = endTable.fields.find((f) => f.name === endFieldNames[i]);
             if (!sf || !ef) break;
             fieldPairs.push({ startFieldId: sf.id, endFieldId: ef.id });
           }

@@ -104,20 +104,36 @@ function countWrappedLines(comment, contentWidth, maxLines) {
       continue;
     }
 
-    const words = paragraph.split(/\s+/).filter(Boolean);
     let lineWidth = 0;
-
-    for (const word of words) {
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
       const wordWidth = ctx.measureText(word).width;
-      if (lineWidth === 0) {
-        lineWidth = wordWidth;
-      } else if (lineWidth + spaceWidth + wordWidth <= contentWidth) {
+      if (lineWidth > 0 && lineWidth + spaceWidth + wordWidth <= contentWidth) {
         lineWidth += spaceWidth + wordWidth;
-      } else {
+        continue;
+      }
+      if (lineWidth > 0) {
         lines++;
         if (lines >= maxLines) break;
-        lineWidth = wordWidth;
+        lineWidth = 0;
       }
+
+      // Scripts without spaces (e.g. CJK) produce "words" wider than the
+      // whole content width; wrap those character by character instead of
+      // counting them as a single line.
+      if (wordWidth <= contentWidth) {
+        lineWidth = wordWidth;
+        continue;
+      }
+      for (const char of word) {
+        const charWidth = ctx.measureText(char).width;
+        if (lineWidth > 0 && lineWidth + charWidth > contentWidth) {
+          lines++;
+          if (lines >= maxLines) break;
+          lineWidth = 0;
+        }
+        lineWidth += charWidth;
+      }
+      if (lines >= maxLines) break;
     }
     if (lineWidth > 0) lines++;
   }
@@ -185,31 +201,33 @@ export function getRelationshipFields(relationship) {
   ];
 }
 
-export function isFieldRelatedToTable(
-  tableId,
-  field,
-  fieldIndex,
-  relationships = [],
-) {
-  return relationships.some((relationship) =>
-    getRelationshipFields(relationship).some(
-      (pair) =>
-        (relationship.startTableId === tableId &&
-          (pair.startFieldId === field.id ||
-            pair.startFieldId === fieldIndex)) ||
-        (relationship.endTableId === tableId &&
-          (pair.endFieldId === field.id || pair.endFieldId === fieldIndex)),
-    ),
-  );
+export function getRelatedFieldKeysByTable(relationships = []) {
+  const byTable = new Map();
+  const add = (tableId, key) => {
+    let keys = byTable.get(tableId);
+    if (!keys) {
+      keys = new Set();
+      byTable.set(tableId, keys);
+    }
+    keys.add(key);
+  };
+  for (const relationship of relationships) {
+    for (const pair of getRelationshipFields(relationship)) {
+      add(relationship.startTableId, pair.startFieldId);
+      add(relationship.endTableId, pair.endFieldId);
+    }
+  }
+  return byTable;
 }
 
-export function getVisibleFieldEntries(table, relationships = []) {
+export function getVisibleFieldEntries(table, relatedFieldKeys) {
   const fields = table.fields ?? [];
 
   return fields.reduce((entries, field, index) => {
     if (
       !table.collapsed ||
-      isFieldRelatedToTable(table.id, field, index, relationships)
+      relatedFieldKeys?.has(field.id) ||
+      relatedFieldKeys?.has(index)
     ) {
       entries.push({ field, originalIndex: index });
     }
@@ -217,14 +235,9 @@ export function getVisibleFieldEntries(table, relationships = []) {
   }, []);
 }
 
-export function getVisibleFields(table, relationships = []) {
-  return getVisibleFieldEntries(table, relationships).map(({ field }) => field);
-}
-
-export function getVisibleFieldIndex(table, fieldId, relationships = []) {
-  return getVisibleFieldEntries(table, relationships).findIndex(
-    ({ field, originalIndex }) =>
-      field.id === fieldId || originalIndex === fieldId,
+export function getVisibleFields(table, relatedFieldKeys) {
+  return getVisibleFieldEntries(table, relatedFieldKeys).map(
+    ({ field }) => field,
   );
 }
 
@@ -254,9 +267,9 @@ export function getFieldOffsetY(
   return total;
 }
 
-export function getTableHeight(table, showComments = true, relationships = []) {
+export function getTableHeight(table, showComments = true, relatedFieldKeys) {
   const width = getTableWidth(table);
-  const visibleFields = getVisibleFields(table, relationships);
+  const visibleFields = getVisibleFields(table, relatedFieldKeys);
 
   return (
     getFieldsTotalHeight(visibleFields, width, showComments) +
@@ -264,4 +277,16 @@ export function getTableHeight(table, showComments = true, relationships = []) {
     tableColorStripHeight +
     getCommentHeight(table.comment, width, showComments)
   );
+}
+
+/**
+ * Returns the center of a table in diagram space, which is the value the
+ * canvas pan has to be set to for the table to appear in the middle of the
+ * screen.
+ */
+export function getTableCenter(table, showComments = true) {
+  return {
+    x: table.x + getTableWidth(table) / 2,
+    y: table.y + getTableHeight(table, showComments) / 2,
+  };
 }
